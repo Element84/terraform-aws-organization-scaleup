@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.103.0
+    hooks:
+      - id: terraform_fmt
+        name: terraform fmt
+      - id: terraform_tflint
+        name: tflint
+        # Exclude the staged folder; it's not a module, rather a holding area for prep, so it's
+        # missing required providers that a normal module would need (and tflint wants to see)
+        exclude: ^src/staged/.*$ 
+
+  # note that pre-commit-terraform does have a built-in terraform_docs hook, but it does not
+  # handle things like recursive.enabled: true well. recommended using this official terraform-docs
+  # hook instead
+  - repo: https://github.com/terraform-docs/terraform-docs
+    rev: v0.21.0
+    hooks:
+      - id: terraform-docs-go
+        args: ["./src"]

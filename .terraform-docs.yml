@@ -1,0 +1,29 @@
+formatter: "markdown"
+
+# terraform-docs is invoked against ./src (see .pre-commit-config.yaml), so the repo-root
+# README.md is never touched. include-main generates src/README.md, and recursion covers
+# each module under src/modules.
+recursive:
+  enabled: true
+  path: modules
+  include-main: true
+
+sections:
+  hide:
+    - resources
+    - data-sources
+    - providers
+
+settings:
+  # extract provider versions from providers.tf rather than from your specific lockfile. without
+  # this, building docs will vary between developers (and cicd), due to differing lockfiles
+  lockfile: false
+
+output:
+  file: "README.md"
+  # enrich README with module documentation, rather than overwriting the entire file
+  mode: "inject"
+  template: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->

@@ -1,0 +1,121 @@
+name: terraform plan
+
+# Run terraform plan anytime a PR to main is opened or updated. Show the plan as a comment to users on the
+# PR, and save the plan file as an artifact so that it can be used in an apply step when the PR is merged.
+on:
+  pull_request:
+    branches:
+      - "main"
+    types: 
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  pre-commit:
+    uses: ./.github/workflows/reusable-precommit.yml
+
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      TERRAFORM_WORKING_DIR: src
+      # helps ensure we never accidentally deploy to the wrong account
+      TF_VAR_rootmgmt_account_id: '["${{ secrets.TF_VAR_rootmgmt_account_id }}"]'
+    permissions:
+      id-token: write   # required to request the OIDC JWT
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Read the terraform version from the .terraform-version file, and then install that version
+      - name: Get Terraform version
+        id: tf_version
+        run: |
+          echo "value=$(cat ./src/.terraform-version)" >> $GITHUB_OUTPUT
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.tf_version.outputs.value }}
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          # The deploy role (src/service_iam.tf) lives in the management account.
+          # TODO: set the TF_VAR_rootmgmt_account_id repository secret to your
+          # management account ID, and the AWS_REGION repository variable to
+          # your home_region.
+          role-to-assume: arn:aws:iam::${{ secrets.TF_VAR_rootmgmt_account_id }}:role/github-actions-deploy-role
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+        run: |
+          terraform init -input=false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          terraform plan --var-file=terraform.tfvars -input=false -out=tfplan.out -no-color 2>&1 | tee plan_output.txt
+
+      - name: Comment PR with Plan
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.TERRAFORM_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const planFailed = '${{ steps.plan.outcome }}' === 'failure';
+            
+            const statusText = planFailed ? '[❌ Plan Failed]' : '';
+            
+            const output = `## Terraform Plan ${statusText}
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`terraform
+            ${planOutput}
+            \`\`\`
+            
+            </details>`;
+            
+            // Find and delete previous terraform plan comments from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            for (const comment of comments) {
+              if (comment.user.login === 'github-actions[bot]' && 
+                  comment.body.includes('Terraform Plan')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+            
+            // Post the new comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail Workflow if Plan Failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Upload Terraform Plan Artifact
+        if: steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # naming the artifact by the pr number ensures the correct plan is pulled on merge
+          name: terraform-plan-${{ github.event.pull_request.number }}
+          path: ${{ env.TERRAFORM_WORKING_DIR }}/tfplan.out
